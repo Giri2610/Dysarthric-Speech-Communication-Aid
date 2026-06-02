@@ -1,93 +1,108 @@
-import subprocess
-import sys
+🚀 STEP 1 — INSTALL LIBRARIES (RUN FIRST)
+!pip install -q transformers librosa gradio soundfile sentencepiece accelerate gtts
+!pip install -q torch torchaudio
 
-def install(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-install("transformers")
-install("torch")
-install("torchaudio")
-install("librosa")
-install("TTS")
-install("gradio")
-
+🧠 STEP 2 — IMPORT LIBRARIES
 import torch
 import librosa
-import tempfile
 import gradio as gr
-from transformers import WhisperForConditionalGeneration, WhisperProcessor, AutoTokenizer, AutoModelForSeq2SeqLM
-from TTS.api import TTS
+import tempfile
 
-# Load Dysarthria Whisper ASR Model
-asr_model = WhisperForConditionalGeneration.from_pretrained("wh1tewhale/dysarthria-automatic-speech-recognition").to("cuda" if torch.cuda.is_available() else "cpu")
-asr_processor = WhisperProcessor.from_pretrained("openai/whisper-small")  # Using base processor
+from transformers import (
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM
+)
 
-# Load Grammar Correction (optional)
-gc_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small")
-gc_tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
+from gtts import gTTS
 
-# Load Coqui TTS
-tts = TTS(model_name="tts_models/en/ljspeech/glow-tts", progress_bar=False)
+⚙️ STEP 3 — LOAD MODELS
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Using device:", device)
 
-def transcribe_and_synthesize(audio_path):
+# Whisper ASR model (dysarthric speech)
+asr_model = WhisperForConditionalGeneration.from_pretrained(
+    "wh1tewhale/dysarthria-automatic-speech-recognition"
+).to(device)
+
+asr_processor = WhisperProcessor.from_pretrained(
+    "openai/whisper-small"
+)
+
+# FLAN-T5 LLM for correction
+gc_model = AutoModelForSeq2SeqLM.from_pretrained(
+    "google/flan-t5-small"
+).to(device)
+
+gc_tokenizer = AutoTokenizer.from_pretrained(
+    "google/flan-t5-small"
+)
+
+🔥 STEP 4 — MAIN PIPELINE FUNCTION
+def speech_pipeline(audio_path):
+
     if audio_path is None:
-        return None, "No input received."
+        return None, "No audio uploaded"
 
-    # 1. Load audio
-    speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
+    # Load audio (16kHz required for Whisper)
+    speech, sr = librosa.load(audio_path, sr=16000)
 
-    # 2. Transcribe
-    inputs = asr_processor(audio=speech_array, sampling_rate=16000, return_tensors="pt")
-    input_features = inputs["input_features"].to(asr_model.device)
+    # --------------------------
+    # 1. Whisper ASR
+    # --------------------------
+    inputs = asr_processor(
+        audio=speech,
+        sampling_rate=16000,
+        return_tensors="pt"
+    )
+
+    inputs = {k: v.to(device) for k, v in inputs.items()}
 
     with torch.no_grad():
-        generated_ids = asr_model.generate(input_features)
+        predicted_ids = asr_model.generate(inputs["input_features"])
 
-    transcription = asr_processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    transcription = asr_processor.tokenizer.batch_decode(
+        predicted_ids,
+        skip_special_tokens=True
+    )[0]
 
-    # 3. Synthesize clean audio
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
-        tts.tts_to_file(text=transcription, file_path=tmp_wav.name)
-        tts_audio_path = tmp_wav.name
+    # --------------------------
+    # 2. FLAN-T5 Correction
+    # --------------------------
+    prompt = f"Correct this sentence: {transcription}"
 
-    return tts_audio_path, transcription
-def transcribe_and_synthesize(audio_path):
-    if audio_path is None:
-        return None, "No input received."
-
-    # 1. Load audio
-    speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
-
-    # 2. Transcribe
-    inputs = asr_processor(audio=speech_array, sampling_rate=16000, return_tensors="pt")
-    input_features = inputs["input_features"].to(asr_model.device)
+    gc_inputs = gc_tokenizer(prompt, return_tensors="pt", truncation=True)
+    gc_inputs = {k: v.to(device) for k, v in gc_inputs.items()}
 
     with torch.no_grad():
-        generated_ids = asr_model.generate(input_features)
+        outputs = gc_model.generate(**gc_inputs, max_new_tokens=64)
 
-    transcription = asr_processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    corrected_text = gc_tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True
+    )
 
-    # 3. Grammar correction
-    input_text = f"Correct this sentence: {transcription}"
-    inputs = gc_tokenizer(input_text, return_tensors="pt").to(gc_model.device)
-    outputs = gc_model.generate(**inputs)
-    corrected_text = gc_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # --------------------------
+    # 3. Text-to-Speech (gTTS)
+    # --------------------------
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+        tts = gTTS(text=corrected_text, lang="en")
+        tts.save(f.name)
+        audio_output = f.name
 
-    # 4. TTS synthesis on corrected text
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
-        tts.tts_to_file(text=corrected_text, file_path=tmp_wav.name)
-        tts_audio_path = tmp_wav.name
+    return audio_output, corrected_text
 
-    return tts_audio_path, corrected_text
-
-
-gr.Interface(
-    fn=transcribe_and_synthesize,
-    inputs=gr.Audio(type="filepath", label="Upload or Record Audio"),
+🎤 STEP 5 — GRADIO UI (RUN THIS LAST)
+demo = gr.Interface(
+    fn=speech_pipeline,
+    inputs=gr.Audio(type="filepath", label="Upload / Record Speech"),
     outputs=[
-        gr.Audio(label="Synthesized Audio", autoplay=False),
-        gr.Textbox(label="Grammar Corrected Text", lines=3)
+        gr.Audio(label="Generated Speech Output"),
+        gr.Textbox(label="Corrected Text")
     ],
-    title="Dysarthric Speech Transcriber + Respeaker",
-    description="🎤 Upload or record speech. Returns grammar-corrected and synthesized speech."
-).launch()
+    title="LLM-Based Dysarthric Speech Communication Aid",
+    description="Whisper ASR + FLAN-T5 Correction + TTS (gTTS)"
+)
+
+demo.launch()
