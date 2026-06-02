@@ -10,3 +10,5 @@ sdk_version: 5.37.0
 app_file: app.py
 pinned: false
 license: mit
+
+Run code in Google Colab
